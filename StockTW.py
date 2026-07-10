@@ -19,6 +19,27 @@ st.set_page_config(
 # 核心功能函數
 # ==========================================
 
+def get_stock_name(symbol, api_key):
+    """新增：從 FinMind API 獲取股票中文名稱"""
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {
+        "dataset": "TaiwanStockInfo",
+        "data_id": symbol
+    }
+    if api_key:
+        params["token"] = api_key
+        
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        # 如果成功獲取資料，回傳第一筆的 stock_name
+        if data.get("status") == 200 and data.get("data"):
+            return data["data"][0].get("stock_name", "")
+    except Exception:
+        pass # 若查詢失敗，則忽略並回傳空字串
+    return ""
+
 def get_stock_data(symbol, api_key, start_date, end_date):
     """F-002: 從 FinMind API 獲取台股歷史數據"""
     fetch_start_date = (pd.to_datetime(start_date) - timedelta(days=100)).strftime('%Y-%m-%d')
@@ -79,17 +100,14 @@ def get_moving_averages(df):
     df['MA60'] = df['close'].rolling(window=60).mean()
     return df
 
-def generate_ai_insights(api_key, symbol, start_date, end_date, price_change, start_price, end_price, df_filtered):
-    """F-006: 使用 Google 新版 genai 套件進行專業技術分析 (完全自動偵測模型)"""
+def generate_ai_insights(api_key, display_symbol, start_date, end_date, price_change, start_price, end_price, df_filtered):
+    """F-006: 使用 Google 新版 genai 套件進行專業技術分析"""
     try:
         client = genai.Client(api_key=api_key)
     except Exception as e:
         return f"API 用戶端建立失敗，請檢查您的 Gemini API Key: {str(e)}"
 
-    # ---------------------------------------------------------
-    # 終極解決方案：自動向 Google 獲取可用模型清單
-    # ---------------------------------------------------------
-    target_model = "gemini-pro" # 絕對保底預設值
+    target_model = "gemini-pro"
     try:
         available_models = []
         for m in client.models.list():
@@ -98,21 +116,16 @@ def generate_ai_insights(api_key, symbol, start_date, end_date, price_change, st
         gemini_models = [m for m in available_models if "gemini" in m.lower()]
         
         if gemini_models:
-            # 優先尋找名稱中帶有 flash 的高效能模型
             flash_models = [m for m in gemini_models if "flash" in m]
             if flash_models:
                 target_model = flash_models[0]
             else:
-                # 找不到 flash 就抓清單裡的第一個可用 gemini 模型
                 target_model = gemini_models[0]
-                
     except Exception:
-        pass # 如果獲取清單失敗，就沿用保底的 gemini-pro
+        pass 
 
-    # 新版 SDK 呼叫時通常不需加 'models/' 前綴
     target_model = target_model.replace('models/', '')
 
-    # 準備給 AI 的 JSON 數據
     df_ai = df_filtered[['date', 'open', 'high', 'low', 'close', 'volume', 'MA5', 'MA10', 'MA20', 'MA60']].copy()
     df_ai['date'] = df_ai['date'].dt.strftime('%Y-%m-%d')
     df_ai = df_ai.fillna("N/A")
@@ -138,11 +151,12 @@ def generate_ai_insights(api_key, symbol, start_date, end_date, price_change, st
 免責聲明：所提供的分析內容純粹基於歷史數據的技術解讀，僅供教育和研究參考，不構成任何投資建議。
 """
     
+    # 這裡的 display_symbol 包含了「代號＋名稱」
     user_prompt = f"""
 請基於以下股票歷史數據進行深度技術分析：
 
 ### 基本資訊
-- 股票代號：{symbol}
+- 股票代號：{display_symbol}
 - 分析期間：{start_date} 至 {end_date}
 - 期間價格變化：{price_change:.2f}% (從 NT${start_price:.2f} 變化到 NT${end_price:.2f})
 
@@ -157,7 +171,7 @@ def generate_ai_insights(api_key, symbol, start_date, end_date, price_change, st
 4. 風險評估
 5. 市場觀察
 
-分析目標：{symbol}
+分析目標：{display_symbol}
 """
     
     full_prompt = f"{system_prompt}\n\n{user_prompt}"
@@ -214,7 +228,12 @@ def main():
             st.sidebar.error("起始日期不能晚於結束日期！")
             return
             
-        with st.spinner("正在從 FinMind 獲取台股歷史數據..."):
+        with st.spinner("正在從 FinMind 獲取台股歷史數據與名稱..."):
+            # 1. 先抓取股票名稱並組合為「代號 名稱」
+            stock_name = get_stock_name(symbol, finmind_api_key)
+            display_symbol = f"{symbol} {stock_name}".strip()
+            
+            # 2. 抓取股價數據
             df_raw = get_stock_data(symbol, finmind_api_key, start_date, end_date)
             
         if df_raw is not None and not df_raw.empty:
@@ -225,7 +244,8 @@ def main():
                 st.warning("所選日期範圍內無交易數據，請擴大日期範圍重試。")
                 return
                 
-            st.info(f"✅ 成功獲取並處理 {symbol} 數據，共 {len(df_filtered)} 筆交易記錄。")
+            # 介面顯示改用 display_symbol
+            st.info(f"✅ 成功獲取並處理 {display_symbol} 數據，共 {len(df_filtered)} 筆交易記錄。")
 
             start_price = df_filtered.iloc[0]['close']
             end_price = df_filtered.iloc[-1]['close']
@@ -266,7 +286,7 @@ def main():
                 ))
 
             fig.update_layout(
-                title=f"台股 {symbol} 歷史股價走勢 ({start_date.strftime('%Y-%m-%d')} 至 {end_date.strftime('%Y-%m-%d')})",
+                title=f"台股 {display_symbol} 歷史股價走勢 ({start_date.strftime('%Y-%m-%d')} 至 {end_date.strftime('%Y-%m-%d')})",
                 xaxis_title="日期",
                 yaxis_title="價格 (TWD)",
                 xaxis_rangeslider_visible=False,
@@ -278,9 +298,10 @@ def main():
 
             st.subheader("🤖 Gemini AI 技術面深度分析")
             with st.spinner("Gemini 正在分析技術指標與歷史走勢，這可能需要幾十秒，請稍候..."):
+                # 把組合好的名稱傳給 AI
                 ai_report = generate_ai_insights(
                     api_key=gemini_api_key,
-                    symbol=symbol,
+                    display_symbol=display_symbol,
                     start_date=start_date.strftime('%Y-%m-%d'),
                     end_date=end_date.strftime('%Y-%m-%d'),
                     price_change=price_change_pct,
@@ -290,7 +311,7 @@ def main():
                 )
             
             st.success("分析完成！")
-            st.markdown(f"> **💡 分析報告 ({symbol})**")
+            st.markdown(f"> **💡 分析報告 ({display_symbol})**")
             st.write(ai_report)
 
             st.subheader("📋 最近 10 筆交易日詳細數據")
