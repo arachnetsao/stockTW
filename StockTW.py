@@ -80,12 +80,37 @@ def get_moving_averages(df):
     return df
 
 def generate_ai_insights(api_key, symbol, start_date, end_date, price_change, start_price, end_price, df_filtered):
-    """F-006: 使用 Google 新版 genai 套件進行專業技術分析"""
+    """F-006: 使用 Google 新版 genai 套件進行專業技術分析 (完全自動偵測模型)"""
     try:
-        # 新版 SDK 初始化客戶端
         client = genai.Client(api_key=api_key)
     except Exception as e:
         return f"API 用戶端建立失敗，請檢查您的 Gemini API Key: {str(e)}"
+
+    # ---------------------------------------------------------
+    # 終極解決方案：自動向 Google 獲取可用模型清單
+    # ---------------------------------------------------------
+    target_model = "gemini-pro" # 絕對保底預設值
+    try:
+        available_models = []
+        for m in client.models.list():
+            available_models.append(m.name)
+            
+        gemini_models = [m for m in available_models if "gemini" in m.lower()]
+        
+        if gemini_models:
+            # 優先尋找名稱中帶有 flash 的高效能模型
+            flash_models = [m for m in gemini_models if "flash" in m]
+            if flash_models:
+                target_model = flash_models[0]
+            else:
+                # 找不到 flash 就抓清單裡的第一個可用 gemini 模型
+                target_model = gemini_models[0]
+                
+    except Exception:
+        pass # 如果獲取清單失敗，就沿用保底的 gemini-pro
+
+    # 新版 SDK 呼叫時通常不需加 'models/' 前綴
+    target_model = target_model.replace('models/', '')
 
     # 準備給 AI 的 JSON 數據
     df_ai = df_filtered[['date', 'open', 'high', 'low', 'close', 'volume', 'MA5', 'MA10', 'MA20', 'MA60']].copy()
@@ -138,22 +163,13 @@ def generate_ai_insights(api_key, symbol, start_date, end_date, price_change, st
     full_prompt = f"{system_prompt}\n\n{user_prompt}"
     
     try:
-        # 新版 SDK 生成內容語法，優先使用 1.5-flash
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model=target_model,
             contents=full_prompt
         )
-        return f"*(已使用最新一代模型: **gemini-1.5-flash**)*\n\n" + response.text
+        return f"*(成功自動連接並使用模型: **{target_model}**)*\n\n" + response.text
     except Exception as e:
-        # 如果 flash 失敗，自動嘗試 1.5-pro 作為備案
-        try:
-            response = client.models.generate_content(
-                model='gemini-1.5-pro',
-                contents=full_prompt
-            )
-            return f"*(已切換備用模型: **gemini-1.5-pro**)*\n\n" + response.text
-        except Exception as e2:
-            return f"AI 分析發生錯誤: {str(e)}\n\n請確認您的 API Key 是否正確且來自 Google AI Studio。"
+        return f"AI 分析發生錯誤: {str(e)}\n\n(系統嘗試使用的模型為: {target_model}，請確認您的 API Key 權限是否足夠)"
 
 # ==========================================
 # 介面與主程式邏輯
