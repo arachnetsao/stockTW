@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import plotly.graph_objects as go
-import google.generativeai as genai
+from google import genai
 from datetime import datetime, timedelta
 import json
 
@@ -21,7 +21,6 @@ st.set_page_config(
 
 def get_stock_data(symbol, api_key, start_date, end_date):
     """F-002: 從 FinMind API 獲取台股歷史數據"""
-    # 往前多抓 100 天的資料，這樣 MA60 (60日均線) 在起始日期才會有數值
     fetch_start_date = (pd.to_datetime(start_date) - timedelta(days=100)).strftime('%Y-%m-%d')
     fetch_end_date = pd.to_datetime(end_date).strftime('%Y-%m-%d')
     
@@ -33,7 +32,7 @@ def get_stock_data(symbol, api_key, start_date, end_date):
         "end_date": fetch_end_date
     }
     
-    if api_key: # FinMind API Key 是選填的
+    if api_key: 
         params["token"] = api_key
         
     try:
@@ -41,14 +40,12 @@ def get_stock_data(symbol, api_key, start_date, end_date):
         response.raise_for_status() 
         data = response.json()
         
-        # 檢查回傳資料狀態
         if data.get("status") != 200 or not data.get("data"):
             st.error(f"API 回應錯誤或查無此股票代碼 ({symbol})。請確認代碼是否正確（台股如: 2330, 0050）。")
             return None
             
         df = pd.DataFrame(data["data"])
         
-        # 轉換 FinMind 欄位名稱以符合系統標準
         df = df.rename(columns={
             "max": "high",
             "min": "low",
@@ -56,8 +53,6 @@ def get_stock_data(symbol, api_key, start_date, end_date):
         })
         
         df['date'] = pd.to_datetime(df['date'])
-        
-        # 確保時間序列為升序 (舊 -> 新)
         df = df.sort_values('date').reset_index(drop=True)
         return df
         
@@ -85,35 +80,13 @@ def get_moving_averages(df):
     return df
 
 def generate_ai_insights(api_key, symbol, start_date, end_date, price_change, start_price, end_price, df_filtered):
-    """F-006: 使用 Google Gemini 進行專業技術分析 (自動偵測可用模型)"""
-    genai.configure(api_key=api_key)
-    
-    # ---------------------------------------------------------
-    # 自動偵測目前 API Key 支援的模型，避免 404 錯誤
-    # ---------------------------------------------------------
-    target_model = None
+    """F-006: 使用 Google 新版 genai 套件進行專業技術分析"""
     try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                # 優先尋找 1.5-flash，其次 1.5-pro，最後是任何可用的 gemini 模型
-                if 'gemini-1.5-flash' in m.name:
-                    target_model = m.name
-                    break
-                elif 'gemini-1.5-pro' in m.name:
-                    target_model = m.name
-                elif not target_model and 'gemini' in m.name:
-                    target_model = m.name
+        # 新版 SDK 初始化客戶端
+        client = genai.Client(api_key=api_key)
     except Exception as e:
-        return f"API 驗證失敗，請檢查 API Key 是否正確且來自 Google AI Studio: {str(e)}"
+        return f"API 用戶端建立失敗，請檢查您的 Gemini API Key: {str(e)}"
 
-    if not target_model:
-        return "錯誤：您的 API Key 目前無法存取任何支援文字生成的 Gemini 模型。建議您至 Google AI Studio 建立一把新的 API Key。"
-
-    # 清理名稱前綴 (移除 'models/' 字串)
-    model_name_clean = target_model.replace('models/', '')
-    model = genai.GenerativeModel(model_name_clean)
-    # ---------------------------------------------------------
-    
     # 準備給 AI 的 JSON 數據
     df_ai = df_filtered[['date', 'open', 'high', 'low', 'close', 'volume', 'MA5', 'MA10', 'MA20', 'MA60']].copy()
     df_ai['date'] = df_ai['date'].dt.strftime('%Y-%m-%d')
@@ -165,10 +138,22 @@ def generate_ai_insights(api_key, symbol, start_date, end_date, price_change, st
     full_prompt = f"{system_prompt}\n\n{user_prompt}"
     
     try:
-        response = model.generate_content(full_prompt)
-        return f"*(已自動選擇可運作模型: **{model_name_clean}**)*\n\n" + response.text
+        # 新版 SDK 生成內容語法，優先使用 1.5-flash
+        response = client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=full_prompt
+        )
+        return f"*(已使用最新一代模型: **gemini-1.5-flash**)*\n\n" + response.text
     except Exception as e:
-        return f"AI 分析發生錯誤: {str(e)}\n\n嘗試使用的模型為: {model_name_clean}。請確認網路狀態或 API 額度限制。"
+        # 如果 flash 失敗，自動嘗試 1.5-pro 作為備案
+        try:
+            response = client.models.generate_content(
+                model='gemini-1.5-pro',
+                contents=full_prompt
+            )
+            return f"*(已切換備用模型: **gemini-1.5-pro**)*\n\n" + response.text
+        except Exception as e2:
+            return f"AI 分析發生錯誤: {str(e)}\n\n請確認您的 API Key 是否正確且來自 Google AI Studio。"
 
 # ==========================================
 # 介面與主程式邏輯

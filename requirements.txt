@@ -2,4 +2,4 @@ streamlit
 requests
 pandas
 plotly
-google-generativeai
+google-genai
